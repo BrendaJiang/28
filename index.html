@@ -261,12 +261,13 @@ function lockConfig(locked) {
 }
 
 /* ── 图像预处理（Otsu 自适应二值化）── */
-async function preprocessImage(blobUrl) {
-  return new Promise((resolve, reject) => {
+async function preprocessImage(imageUrl) {
+  return new Promise((resolve) => {
     const img = new Image();
+    img.crossOrigin = 'anonymous';  // 允许 canvas 读取跨域图片
+
     img.onload = () => {
       try {
-        // 将图片缩放到 600–2400px 范围内
         const MAX = 2400, MIN = 600;
         let { naturalWidth: w, naturalHeight: h } = img;
         const scale = w < MIN ? MIN / w : w > MAX ? MAX / w : 1;
@@ -315,11 +316,15 @@ async function preprocessImage(blobUrl) {
         ctx.putImageData(imgData, 0, 0);
         resolve(canvas.toDataURL('image/png'));
       } catch (e) {
-        reject(e);
+        // canvas 被污染（CORS 未通过）或其他错误，降级用原始 URL
+        console.warn('预处理失败，降级用原始URL:', e.message);
+        resolve(imageUrl);
       }
     };
-    img.onerror = reject;
-    img.src = blobUrl;
+
+    // 图片加载失败也降级
+    img.onerror = () => resolve(imageUrl);
+    img.src = imageUrl;
   });
 }
 
@@ -429,7 +434,10 @@ async function run() {
       corePath:   assets,
       langPath:   assets + 'tessdata',
     });
-    await state.worker.setParameters({ tessedit_pageseg_mode: '6' });
+    await state.worker.setParameters({
+      tessedit_pageseg_mode:   '11',  // 稀疏文字模式：适合标签图片
+      tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-',
+    });
 
     /* 6. 逐行处理 */
     setStatus('loading', `开始识别，共 ${total} 条记录…`);
@@ -466,21 +474,34 @@ async function run() {
           if (!attachUrl) {
             debugInfo = '附件URL获取失败（SDK未返回URL）';
           } else {
-            debugInfo = `URL已获取`;
-            // 直接将 URL 传给 Tesseract worker（worker 线程内部加载，绕过主线程 CORS）
-            const { data: { text } } = await state.worker.recognize(attachUrl);
+            debugInfo = 'URL已获取，预处理中…';
+            const processed = await preprocessImage(attachUrl);
+            debugInfo = `预处理完成(${processed.startsWith('data:') ? 'canvas' : 'url'})`;
+
+            // PSM 11：稀疏文字，适合标签
+            const { data: { text } } = await state.worker.recognize(processed);
             rawOcrText = text;
-            debugInfo = `OCR完成(PSM6) 文本长度=${text.length}`;
+            debugInfo = `OCR完成(PSM11) 长度=${text.length}`;
             recognized = extractAssetNumber(text);
 
-            // 未识别则用单行模式重试
+            // 未匹配则换 PSM 6（整块文字）重试
+            if (!recognized) {
+              await state.worker.setParameters({ tessedit_pageseg_mode: '6' });
+              const { data: { text: t6 } } = await state.worker.recognize(processed);
+              rawOcrText = t6;
+              debugInfo = `OCR完成(PSM6) 长度=${t6.length}`;
+              recognized = extractAssetNumber(t6);
+              await state.worker.setParameters({ tessedit_pageseg_mode: '11' });
+            }
+
+            // 还未匹配则换 PSM 7（单行）重试
             if (!recognized) {
               await state.worker.setParameters({ tessedit_pageseg_mode: '7' });
-              const { data: { text: text7 } } = await state.worker.recognize(attachUrl);
-              rawOcrText = text7;
-              debugInfo = `OCR完成(PSM7) 文本长度=${text7.length}`;
-              recognized = extractAssetNumber(text7);
-              await state.worker.setParameters({ tessedit_pageseg_mode: '6' });
+              const { data: { text: t7 } } = await state.worker.recognize(processed);
+              rawOcrText = t7;
+              debugInfo = `OCR完成(PSM7) 长度=${t7.length}`;
+              recognized = extractAssetNumber(t7);
+              await state.worker.setParameters({ tessedit_pageseg_mode: '11' });
             }
           }
         } catch (ocrErr) {

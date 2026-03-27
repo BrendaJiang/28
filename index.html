@@ -353,40 +353,17 @@ function hasValue(cellVal) {
   return false;
 }
 
-/* ── 获取附件 URL（多种方式容错）── */
+/* ── 获取附件临时 URL ── */
 async function getFirstAttachmentUrl(table, fieldId, recordId, cellVal) {
   if (!hasValue(cellVal)) return null;
   const attachments = Array.isArray(cellVal) ? cellVal : [];
   if (attachments.length === 0) return null;
-
-  const first = attachments[0];
-  // 打印附件对象结构，帮助排查
-  console.log('[附件调试] cellVal[0]:', JSON.stringify(first));
-
-  // 方式 1：部分 SDK 版本的附件对象直接携带临时 URL
-  if (first.tmpUrl) return first.tmpUrl;
-  if (first.url)    return first.url;
-
-  // 方式 2：传入完整对象数组
-  try {
-    const urls = await table.getCellAttachmentUrls(attachments, fieldId, recordId);
-    if (urls && urls.length > 0) return urls[0];
-  } catch (e1) {
-    console.warn('[附件调试] 全对象方式失败:', e1.message);
-  }
-
-  // 方式 3：只传 token 字符串数组
-  const token = first.token || first.fileToken;
-  if (token) {
-    try {
-      const urls = await table.getCellAttachmentUrls([token], fieldId, recordId);
-      if (urls && urls.length > 0) return urls[0];
-    } catch (e2) {
-      console.warn('[附件调试] token字符串方式失败:', e2.message);
-    }
-  }
-
-  return null;
+  const token = attachments[0].token || attachments[0].fileToken;
+  if (!token) return null;
+  // SDK 签名：getCellAttachmentUrls(tokens: string[], fieldId, recordId)
+  const urls = await table.getCellAttachmentUrls([token], fieldId, recordId);
+  if (!urls || urls.length === 0) return null;
+  return urls[0];
 }
 
 /* ── 主流程 ── */
@@ -463,12 +440,6 @@ async function run() {
       try {
         const photoVal  = await table.getCellValue(photoField.id, recordId);
         const resultVal = await table.getCellValue(resultField.id, recordId);
-
-        // 打印第一行的原始附件结构，帮助排查字段名
-        if (i === 0) {
-          console.log('[结构调试] photoVal:', JSON.stringify(photoVal));
-          console.log('[结构调试] resultVal:', JSON.stringify(resultVal));
-        }
 
         // 两列都有值 → 跳过
         if (hasValue(photoVal) && hasValue(resultVal)) {

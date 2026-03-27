@@ -353,15 +353,40 @@ function hasValue(cellVal) {
   return false;
 }
 
-/* ── 获取附件临时 URL（直接返回 SDK 签名 URL，不 fetch，避免 CORS）── */
+/* ── 获取附件 URL（多种方式容错）── */
 async function getFirstAttachmentUrl(table, fieldId, recordId, cellVal) {
   if (!hasValue(cellVal)) return null;
   const attachments = Array.isArray(cellVal) ? cellVal : [];
   if (attachments.length === 0) return null;
-  // 传入完整 attachment 对象数组，SDK 返回签名临时 URL
-  const urls = await table.getCellAttachmentUrls(attachments, fieldId, recordId);
-  if (!urls || urls.length === 0) return null;
-  return urls[0];  // 直接返回 URL，不再 fetch 转 blob
+
+  const first = attachments[0];
+  // 打印附件对象结构，帮助排查
+  console.log('[附件调试] cellVal[0]:', JSON.stringify(first));
+
+  // 方式 1：部分 SDK 版本的附件对象直接携带临时 URL
+  if (first.tmpUrl) return first.tmpUrl;
+  if (first.url)    return first.url;
+
+  // 方式 2：传入完整对象数组
+  try {
+    const urls = await table.getCellAttachmentUrls(attachments, fieldId, recordId);
+    if (urls && urls.length > 0) return urls[0];
+  } catch (e1) {
+    console.warn('[附件调试] 全对象方式失败:', e1.message);
+  }
+
+  // 方式 3：只传 token 字符串数组
+  const token = first.token || first.fileToken;
+  if (token) {
+    try {
+      const urls = await table.getCellAttachmentUrls([token], fieldId, recordId);
+      if (urls && urls.length > 0) return urls[0];
+    } catch (e2) {
+      console.warn('[附件调试] token字符串方式失败:', e2.message);
+    }
+  }
+
+  return null;
 }
 
 /* ── 主流程 ── */

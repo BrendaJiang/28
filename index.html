@@ -461,26 +461,35 @@ async function run() {
         // OCR
         let recognized = null;
         let blobUrl    = null;
-        let rawOcrText = '';  // 保存原始识别文本用于调试
+        let rawOcrText = '';
+        let debugInfo  = '';  // 详细调试信息
         try {
           blobUrl = await getFirstAttachmentUrl(table, photoField.id, recordId, photoVal);
-          if (blobUrl) {
+          if (!blobUrl) {
+            debugInfo = '附件URL获取失败';
+          } else {
+            debugInfo = '附件已下载';
             const processed = await preprocessImage(blobUrl);
+            debugInfo = '图片已预处理';
+
             const { data: { text } } = await state.worker.recognize(processed);
             rawOcrText = text;
+            debugInfo = `OCR完成(PSM6)，长度${text.length}`;
             recognized = extractAssetNumber(text);
 
             // 未识别则用单行模式重试
             if (!recognized) {
               await state.worker.setParameters({ tessedit_pageseg_mode: '7' });
               const { data: { text: text7 } } = await state.worker.recognize(processed);
-              rawOcrText = text7;  // 更新为重试后的文本
+              rawOcrText = text7;
+              debugInfo = `OCR完成(PSM7)，长度${text7.length}`;
               recognized = extractAssetNumber(text7);
               await state.worker.setParameters({ tessedit_pageseg_mode: '6' });
             }
           }
         } catch (ocrErr) {
           console.error('OCR 出错', ocrErr);
+          debugInfo = `异常: ${ocrErr.message || ocrErr}`;
         } finally {
           if (blobUrl) URL.revokeObjectURL(blobUrl);
         }
@@ -492,10 +501,12 @@ async function run() {
           addLog('ok', `第 ${i + 1} 行 → ${recognized}`);
         } else {
           state.stats.fail++;
-          // 显示 OCR 原始文本前 80 字符用于调试
-          const preview = rawOcrText.trim().substring(0, 80).replace(/\n/g, ' ');
-          const hint = preview ? `OCR 识别内容：${preview}` : '无法读取图片或图片为空';
-          addLog('fail', `第 ${i + 1} 行 — 未能提取编号（${hint}）`);
+          const preview = rawOcrText.trim().substring(0, 100).replace(/\n/g, '↵');
+          const msg = preview
+            ? `第 ${i + 1} 行 [${debugInfo}] OCR文本: "${preview}"`
+            : `第 ${i + 1} 行 — ${debugInfo}`;
+          addLog('fail', msg);
+          console.log(`[调试] 第${i+1}行完整OCR文本:`, rawOcrText);
         }
       } catch (rowErr) {
         console.error('处理记录出错', recordId, rowErr);

@@ -464,6 +464,12 @@ async function run() {
         const photoVal  = await table.getCellValue(photoField.id, recordId);
         const resultVal = await table.getCellValue(resultField.id, recordId);
 
+        // 打印第一行的原始附件结构，帮助排查字段名
+        if (i === 0) {
+          console.log('[结构调试] photoVal:', JSON.stringify(photoVal));
+          console.log('[结构调试] resultVal:', JSON.stringify(resultVal));
+        }
+
         // 两列都有值 → 跳过
         if (hasValue(photoVal) && hasValue(resultVal)) {
           state.stats.skip++;

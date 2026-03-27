@@ -260,6 +260,26 @@ function lockConfig(locked) {
   document.getElementById('result-field').disabled = locked;
 }
 
+/* ── 方向校正：img → canvas（浏览器自动应用 EXIF 旋转），输出 DataURL ── */
+function correctOrientation(src) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width  = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        canvas.getContext('2d').drawImage(img, 0, 0);
+        resolve(canvas.toDataURL('image/jpeg', 0.92));
+      } catch (_) {
+        resolve(src);  // canvas 失败则原样返回
+      }
+    };
+    img.onerror = () => resolve(src);
+    img.src = src;
+  });
+}
+
 /* ── 图像预处理：fetch → blob URL → canvas Otsu 二值化 ── */
 async function preprocessImage(imageUrl) {
   // 用 fetch 拿 blob，blob URL 不受 CORS 限制，canvas 不会被污染
@@ -495,7 +515,6 @@ async function run() {
             } catch (_) {}
             const src = blobUrl || attachUrl;
 
-            // 策略 1：直接识别原图（LSTM 引擎自带内部预处理，对彩色照片效果更好）
             const tryRecognize = async (image, psmList) => {
               for (const psm of psmList) {
                 await state.worker.setParameters({ tessedit_pageseg_mode: psm });
@@ -508,13 +527,15 @@ async function run() {
               return null;
             };
 
-            recognized = await tryRecognize(src, ['11', '6', '3', '7']);
+            // 策略 1：EXIF 方向校正（浏览器 drawImage 自动旋正）→ LSTM 识别
+            const oriented = await correctOrientation(src);
+            recognized = await tryRecognize(oriented, ['11', '6', '3', '7']);
 
-            // 策略 2：Otsu 二值化后再识别（原图失败时兜底）
+            // 策略 2：在校正后的图上做 Otsu（低对比度图片兜底）
             if (!recognized) {
               debugInfo = '改用Otsu预处理…';
               const processed = await preprocessImage(src);
-              if (processed !== src) {  // 确认 canvas Otsu 成功（返回 data: URL）
+              if (processed !== src) {
                 recognized = await tryRecognize(processed, ['11', '6', '7']);
               }
             }

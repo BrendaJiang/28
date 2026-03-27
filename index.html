@@ -460,18 +460,21 @@ async function run() {
 
         // OCR
         let recognized = null;
-        let blobUrl     = null;
+        let blobUrl    = null;
+        let rawOcrText = '';  // 保存原始识别文本用于调试
         try {
           blobUrl = await getFirstAttachmentUrl(table, photoField.id, recordId, photoVal);
           if (blobUrl) {
             const processed = await preprocessImage(blobUrl);
             const { data: { text } } = await state.worker.recognize(processed);
+            rawOcrText = text;
             recognized = extractAssetNumber(text);
 
             // 未识别则用单行模式重试
             if (!recognized) {
               await state.worker.setParameters({ tessedit_pageseg_mode: '7' });
               const { data: { text: text7 } } = await state.worker.recognize(processed);
+              rawOcrText = text7;  // 更新为重试后的文本
               recognized = extractAssetNumber(text7);
               await state.worker.setParameters({ tessedit_pageseg_mode: '6' });
             }
@@ -489,7 +492,10 @@ async function run() {
           addLog('ok', `第 ${i + 1} 行 → ${recognized}`);
         } else {
           state.stats.fail++;
-          addLog('fail', `第 ${i + 1} 行 — 未能从图片中提取到编号`);
+          // 显示 OCR 原始文本前 80 字符用于调试
+          const preview = rawOcrText.trim().substring(0, 80).replace(/\n/g, ' ');
+          const hint = preview ? `OCR 识别内容：${preview}` : '无法读取图片或图片为空';
+          addLog('fail', `第 ${i + 1} 行 — 未能提取编号（${hint}）`);
         }
       } catch (rowErr) {
         console.error('处理记录出错', recordId, rowErr);

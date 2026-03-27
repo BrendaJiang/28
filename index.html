@@ -353,18 +353,15 @@ function hasValue(cellVal) {
   return false;
 }
 
-/* ── 获取附件 Blob URL ── */
+/* ── 获取附件临时 URL（直接返回 SDK 签名 URL，不 fetch，避免 CORS）── */
 async function getFirstAttachmentUrl(table, fieldId, recordId, cellVal) {
   if (!hasValue(cellVal)) return null;
-  try {
-    const urls = await table.getCellAttachmentUrls([cellVal[0]], fieldId, recordId);
-    if (!urls || urls.length === 0) return null;
-    const resp = await fetch(urls[0]);
-    if (!resp.ok) return null;
-    return URL.createObjectURL(await resp.blob());
-  } catch (_) {
-    return null;
-  }
+  const attachments = Array.isArray(cellVal) ? cellVal : [];
+  if (attachments.length === 0) return null;
+  // 传入完整 attachment 对象数组，SDK 返回签名临时 URL
+  const urls = await table.getCellAttachmentUrls(attachments, fieldId, recordId);
+  if (!urls || urls.length === 0) return null;
+  return urls[0];  // 直接返回 URL，不再 fetch 转 blob
 }
 
 /* ── 主流程 ── */
@@ -460,29 +457,26 @@ async function run() {
 
         // OCR
         let recognized = null;
-        let blobUrl    = null;
         let rawOcrText = '';
-        let debugInfo  = '';  // 详细调试信息
+        let debugInfo  = '';
         try {
-          blobUrl = await getFirstAttachmentUrl(table, photoField.id, recordId, photoVal);
-          if (!blobUrl) {
-            debugInfo = '附件URL获取失败';
+          const attachUrl = await getFirstAttachmentUrl(table, photoField.id, recordId, photoVal);
+          if (!attachUrl) {
+            debugInfo = '附件URL获取失败（SDK未返回URL）';
           } else {
-            debugInfo = '附件已下载';
-            const processed = await preprocessImage(blobUrl);
-            debugInfo = '图片已预处理';
-
-            const { data: { text } } = await state.worker.recognize(processed);
+            debugInfo = `URL已获取`;
+            // 直接将 URL 传给 Tesseract worker（worker 线程内部加载，绕过主线程 CORS）
+            const { data: { text } } = await state.worker.recognize(attachUrl);
             rawOcrText = text;
-            debugInfo = `OCR完成(PSM6)，长度${text.length}`;
+            debugInfo = `OCR完成(PSM6) 文本长度=${text.length}`;
             recognized = extractAssetNumber(text);
 
             // 未识别则用单行模式重试
             if (!recognized) {
               await state.worker.setParameters({ tessedit_pageseg_mode: '7' });
-              const { data: { text: text7 } } = await state.worker.recognize(processed);
+              const { data: { text: text7 } } = await state.worker.recognize(attachUrl);
               rawOcrText = text7;
-              debugInfo = `OCR完成(PSM7)，长度${text7.length}`;
+              debugInfo = `OCR完成(PSM7) 文本长度=${text7.length}`;
               recognized = extractAssetNumber(text7);
               await state.worker.setParameters({ tessedit_pageseg_mode: '6' });
             }
@@ -490,8 +484,6 @@ async function run() {
         } catch (ocrErr) {
           console.error('OCR 出错', ocrErr);
           debugInfo = `异常: ${ocrErr.message || ocrErr}`;
-        } finally {
-          if (blobUrl) URL.revokeObjectURL(blobUrl);
         }
 
         // 回写

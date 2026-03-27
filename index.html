@@ -260,11 +260,22 @@ function lockConfig(locked) {
   document.getElementById('result-field').disabled = locked;
 }
 
-/* ── 图像预处理（Otsu 自适应二值化）── */
+/* ── 图像预处理：fetch → blob URL → canvas Otsu 二值化 ── */
 async function preprocessImage(imageUrl) {
+  // 用 fetch 拿 blob，blob URL 不受 CORS 限制，canvas 不会被污染
+  let blobUrl = null;
+  try {
+    const resp = await fetch(imageUrl);
+    if (resp.ok) {
+      blobUrl = URL.createObjectURL(await resp.blob());
+    }
+  } catch (_) {}
+
+  const src = blobUrl || imageUrl;   // fetch 失败则直接用原始 URL
+
   return new Promise((resolve) => {
     const img = new Image();
-    img.crossOrigin = 'anonymous';  // 允许 canvas 读取跨域图片
+    if (!blobUrl) img.crossOrigin = 'anonymous';   // 非 blob 时仍尝试 CORS
 
     img.onload = () => {
       try {
@@ -314,17 +325,19 @@ async function preprocessImage(imageUrl) {
           data[i * 4 + 3] = 255;
         }
         ctx.putImageData(imgData, 0, 0);
+        if (blobUrl) URL.revokeObjectURL(blobUrl);
         resolve(canvas.toDataURL('image/png'));
       } catch (e) {
-        // canvas 被污染（CORS 未通过）或其他错误，降级用原始 URL
-        console.warn('预处理失败，降级用原始URL:', e.message);
-        resolve(imageUrl);
+        if (blobUrl) URL.revokeObjectURL(blobUrl);
+        resolve(imageUrl);   // canvas 失败则兜底原始 URL
       }
     };
 
-    // 图片加载失败也降级
-    img.onerror = () => resolve(imageUrl);
-    img.src = imageUrl;
+    img.onerror = () => {
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+      resolve(imageUrl);
+    };
+    img.src = src;
   });
 }
 
@@ -502,6 +515,15 @@ async function run() {
               debugInfo = `OCR完成(PSM7) 长度=${t7.length}`;
               recognized = extractAssetNumber(t7);
               await state.worker.setParameters({ tessedit_pageseg_mode: '11' });
+            }
+
+            // 预处理后仍为空（Otsu 或 fetch 失败）→ 直接用原始 URL 兜底
+            if (!recognized && rawOcrText.trim().length === 0 && processed !== attachUrl) {
+              debugInfo = 'Otsu为空，改用原始URL兜底';
+              const { data: { text: tRaw } } = await state.worker.recognize(attachUrl);
+              rawOcrText = tRaw;
+              debugInfo = `原始URL OCR 长度=${tRaw.length}`;
+              recognized = extractAssetNumber(tRaw);
             }
           }
         } catch (ocrErr) {

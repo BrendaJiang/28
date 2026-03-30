@@ -550,7 +550,7 @@ async function run() {
     /* 5. 初始化 Tesseract Worker */
     setStatus('loading', '加载 OCR 引擎…');
     const assets = new URL('./assets/', document.baseURI).href;
-    state.worker = await Tesseract.createWorker('eng', 3, {
+    state.worker = await Tesseract.createWorker('chi_sim+eng', 3, {
       logger:     () => {},
       workerPath: assets + 'worker.min.js',
       corePath:   assets,

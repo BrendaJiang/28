@@ -295,6 +295,31 @@ function correctOrientation(src) {
   });
 }
 
+/* ── 图像旋转（处理标签竖贴/侧贴的情况）── */
+function rotateImage(src, degrees) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const rad = degrees * Math.PI / 180;
+        const sin = Math.abs(Math.sin(rad)), cos = Math.abs(Math.cos(rad));
+        const w = img.naturalWidth, h = img.naturalHeight;
+        const rw = Math.round(w * cos + h * sin);
+        const rh = Math.round(w * sin + h * cos);
+        const canvas = document.createElement('canvas');
+        canvas.width = rw; canvas.height = rh;
+        const ctx = canvas.getContext('2d');
+        ctx.translate(rw / 2, rh / 2);
+        ctx.rotate(rad);
+        ctx.drawImage(img, -w / 2, -h / 2);
+        resolve(canvas.toDataURL('image/png'));
+      } catch (e) { resolve(src); }
+    };
+    img.onerror = () => resolve(src);
+    img.src = src;
+  });
+}
+
 /* ── 图像预处理：灰度 + 对比度拉伸 + 2× 放大 ── */
 function enhanceContrast(src) {
   return new Promise((resolve) => {
@@ -619,7 +644,21 @@ async function run() {
             debugInfo = canvasOk ? `canvas:${oriented.length}` : 'canvas失败用blobURL';
             recognized = await tryRecognize(oriented, ['11', '6', '3', '7']);
 
-            // 策略 2：2×3 分块 + 3× 放大（标签在大图中占比小时有效）
+            // 策略 2：旋转 90° 顺时针（标签竖贴、2×36 窄条错误根因）
+            if (!recognized) {
+              debugInfo = '旋转90°CW…';
+              const rot90 = await rotateImage(src, 90);
+              if (rot90 !== src) recognized = await tryRecognize(rot90, ['11', '6', '3', '7']);
+            }
+
+            // 策略 3：旋转 90° 逆时针
+            if (!recognized) {
+              debugInfo = '旋转90°CCW…';
+              const rot270 = await rotateImage(src, 270);
+              if (rot270 !== src) recognized = await tryRecognize(rot270, ['11', '6', '3', '7']);
+            }
+
+            // 策略 4：2×3 分块 + 3× 放大（标签在大图中占比小时有效）
             if (!recognized) {
               debugInfo = '分块识别…';
               recognized = await new Promise((resolveTile) => {
@@ -652,7 +691,7 @@ async function run() {
               });
             }
 
-            // 策略 3：灰度 + 对比度拉伸 + 2× 放大（低对比度标签）
+            // 策略 5：灰度 + 对比度拉伸 + 2× 放大（低对比度标签）
             if (!recognized) {
               debugInfo = '对比度增强…';
               const enhanced = await enhanceContrast(src);
@@ -661,7 +700,7 @@ async function run() {
               }
             }
 
-            // 策略 4：Otsu 二值化兜底
+            // 策略 6：Otsu 二值化兜底
             if (!recognized) {
               debugInfo = '改用Otsu预处理…';
               const processed = await preprocessImage(src);

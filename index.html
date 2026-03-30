@@ -461,8 +461,11 @@ function extractAssetNumber(rawText) {
   for (const pattern of [r1, r2, r3]) {
     const matches = text.match(pattern);
     if (matches && matches.length > 0) {
-      // 取最短匹配（去除 OCR 噪点拼接的多余前缀），但至少要有连字符结构
-      return matches.sort((a, b) => a.length - b.length)[0].toUpperCase();
+      // 取最短匹配（去除 OCR 噪点拼接的多余前缀）
+      let result = matches.sort((a, b) => a.length - b.length)[0].toUpperCase();
+      // 补全首段单数字为两位（OCR 常丢前导零：1-0101-00004 → 01-0101-00004）
+      result = result.replace(/^([0-9])-/, '0$1-');
+      return result;
     }
   }
   return null;
@@ -722,6 +725,7 @@ async function run() {
           await table.setCellValue(resultField.id, recordId, [{ type: 'text', text: recognized }]);
           state.stats.ok++;
           addLog('ok', `第 ${i + 1} 行 → ${recognized}`);
+          console.log(`[调试] 第${i+1}行成功，OCR原文:`, rawOcrText.trim().substring(0, 200));
         } else {
           state.stats.fail++;
           const preview = rawOcrText.trim().substring(0, 100).replace(/\n/g, '↵');

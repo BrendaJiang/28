@@ -545,6 +545,8 @@ async function run() {
 
             // 策略 1：EXIF 方向校正（浏览器 drawImage 自动旋正）→ LSTM 识别
             const oriented = await correctOrientation(src);
+            const canvasOk = typeof oriented === 'string' && oriented.startsWith('data:');
+            debugInfo = canvasOk ? `canvas:${oriented.length}` : 'canvas失败用blobURL';
             recognized = await tryRecognize(oriented, ['11', '6', '3', '7']);
 
             // 策略 2：在校正后的图上做 Otsu（低对比度图片兜底）

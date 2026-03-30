@@ -260,19 +260,35 @@ function lockConfig(locked) {
   document.getElementById('result-field').disabled = locked;
 }
 
-/* ── 方向校正：img → canvas（浏览器自动应用 EXIF 旋转），输出 DataURL ── */
+/* ── 方向校正 + 缩放：EXIF 旋正并缩至最长边 ≤ 1800px ── */
 function correctOrientation(src) {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
       try {
+        let w = img.naturalWidth;
+        let h = img.naturalHeight;
+        // 强制缩小，防止大图导致 canvas 内存溢出
+        const MAX = 1800;
+        const longest = Math.max(w, h);
+        if (longest > MAX) {
+          const s = MAX / longest;
+          w = Math.round(w * s);
+          h = Math.round(h * s);
+        }
         const canvas = document.createElement('canvas');
-        canvas.width  = img.naturalWidth;
-        canvas.height = img.naturalHeight;
-        canvas.getContext('2d').drawImage(img, 0, 0);
-        resolve(canvas.toDataURL('image/jpeg', 0.92));
-      } catch (_) {
-        resolve(src);  // canvas 失败则原样返回
+        canvas.width  = w;
+        canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        // 检测画布是否真的有内容（非全黑/全白空白）
+        const sample = canvas.getContext('2d').getImageData(w >> 1, h >> 1, 1, 1).data;
+        // 若中心像素是纯黑则可能空白，但先不回退，交给 Tesseract 判断
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
+        console.log('[orient] canvas', w, 'x', h, 'dataURL len:', dataUrl.length);
+        resolve(dataUrl);
+      } catch (e) {
+        console.warn('[orient] canvas失败:', e.message);
+        resolve(src);
       }
     };
     img.onerror = () => resolve(src);

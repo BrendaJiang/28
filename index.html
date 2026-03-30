@@ -283,8 +283,7 @@ function correctOrientation(src) {
         // 检测画布是否真的有内容（非全黑/全白空白）
         const sample = canvas.getContext('2d').getImageData(w >> 1, h >> 1, 1, 1).data;
         // 若中心像素是纯黑则可能空白，但先不回退，交给 Tesseract 判断
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
-        console.log('[orient] canvas', w, 'x', h, 'dataURL len:', dataUrl.length);
+        const dataUrl = canvas.toDataURL('image/png');  // PNG 无损，Tesseract 解码更可靠
         resolve(dataUrl);
       } catch (e) {
         console.warn('[orient] canvas失败:', e.message);
@@ -477,7 +476,7 @@ async function run() {
     /* 5. 初始化 Tesseract Worker */
     setStatus('loading', '加载 OCR 引擎…');
     const assets = new URL('./assets/', document.baseURI).href;
-    state.worker = await Tesseract.createWorker('eng', 1, {
+    state.worker = await Tesseract.createWorker('eng', 3, {
       logger:     () => {},
       workerPath: assets + 'worker.min.js',
       corePath:   assets,

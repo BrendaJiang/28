@@ -591,13 +591,68 @@ async function run() {
               return null;
             };
 
+            // 策略 0：系统级 TextDetector（Chrome/Android ML Kit / Windows OCR / macOS Vision）
+            // 对真实照片比 Tesseract 准确得多；不支持时静默跳过
+            if ('TextDetector' in window) {
+              try {
+                const detector = new TextDetector();
+                const blobResp = await fetch(src);
+                const imgBlob = await blobResp.blob();
+                const bitmap = await createImageBitmap(imgBlob);
+                const detected = await detector.detect(bitmap);
+                bitmap.close();
+                if (detected && detected.length > 0) {
+                  rawOcrText = detected.map(t => t.rawValue).join('\n');
+                  debugInfo = `系统OCR ${detected.length}块`;
+                  recognized = extractAssetNumber(rawOcrText);
+                } else {
+                  debugInfo = '系统OCR 未检测到文字';
+                }
+              } catch (sysErr) {
+                console.warn('[TextDetector]', sysErr.message);
+              }
+            }
+
             // 策略 1：EXIF 方向校正（浏览器 drawImage 自动旋正）→ LSTM 识别
             const oriented = await correctOrientation(src);
             const canvasOk = typeof oriented === 'string' && oriented.startsWith('data:');
             debugInfo = canvasOk ? `canvas:${oriented.length}` : 'canvas失败用blobURL';
             recognized = await tryRecognize(oriented, ['11', '6', '3', '7']);
 
-            // 策略 2：灰度 + 对比度拉伸 + 2× 放大（细小或低对比度标签）
+            // 策略 2：2×3 分块 + 3× 放大（标签在大图中占比小时有效）
+            if (!recognized) {
+              debugInfo = '分块识别…';
+              recognized = await new Promise((resolveTile) => {
+                const img2 = new Image();
+                img2.onload = async () => {
+                  const W = img2.naturalWidth, H = img2.naturalHeight;
+                  const COLS = 2, ROWS = 3, SCALE = 3;
+                  const stepX = Math.round(W / COLS), stepY = Math.round(H / ROWS);
+                  let found = null;
+                  for (let row = 0; row < ROWS && !found; row++) {
+                    for (let col = 0; col < COLS && !found; col++) {
+                      const x = Math.max(0, col * stepX - Math.round(stepX * 0.15));
+                      const y = Math.max(0, row * stepY - Math.round(stepY * 0.15));
+                      const w = Math.min(W - x, Math.round(stepX * 1.3));
+                      const h = Math.min(H - y, Math.round(stepY * 1.3));
+                      const cv = document.createElement('canvas');
+                      cv.width  = Math.min(w * SCALE, 3600);
+                      cv.height = Math.min(h * SCALE, 3600);
+                      const cx2 = cv.getContext('2d');
+                      cx2.imageSmoothingEnabled = true;
+                      cx2.imageSmoothingQuality = 'high';
+                      cx2.drawImage(img2, x, y, w, h, 0, 0, cv.width, cv.height);
+                      found = await tryRecognize(cv.toDataURL('image/png'), ['11', '6', '3']);
+                    }
+                  }
+                  resolveTile(found);
+                };
+                img2.onerror = () => resolveTile(null);
+                img2.src = src;
+              });
+            }
+
+            // 策略 3：灰度 + 对比度拉伸 + 2× 放大（低对比度标签）
             if (!recognized) {
               debugInfo = '对比度增强…';
               const enhanced = await enhanceContrast(src);
@@ -606,38 +661,7 @@ async function run() {
               }
             }
 
-            // 策略 3：反色（白底黑字 → 黑底白字 或反过来）
-            if (!recognized) {
-              debugInfo = '反色处理…';
-              const inverted = await (function invertImage(dataUrl) {
-                return new Promise((res) => {
-                  const img2 = new Image();
-                  img2.onload = () => {
-                    try {
-                      const c = document.createElement('canvas');
-                      c.width = img2.naturalWidth; c.height = img2.naturalHeight;
-                      const cx = c.getContext('2d');
-                      cx.drawImage(img2, 0, 0);
-                      const id = cx.getImageData(0, 0, c.width, c.height);
-                      for (let j = 0; j < id.data.length; j += 4) {
-                        id.data[j] = 255 - id.data[j];
-                        id.data[j+1] = 255 - id.data[j+1];
-                        id.data[j+2] = 255 - id.data[j+2];
-                      }
-                      cx.putImageData(id, 0, 0);
-                      res(c.toDataURL('image/png'));
-                    } catch(_) { res(dataUrl); }
-                  };
-                  img2.onerror = () => res(dataUrl);
-                  img2.src = dataUrl;
-                });
-              })(oriented);
-              if (inverted !== oriented) {
-                recognized = await tryRecognize(inverted, ['11', '6', '3']);
-              }
-            }
-
-            // 策略 4：在校正后的图上做 Otsu（低对比度图片兜底）
+            // 策略 4：Otsu 二值化兜底
             if (!recognized) {
               debugInfo = '改用Otsu预处理…';
               const processed = await preprocessImage(src);

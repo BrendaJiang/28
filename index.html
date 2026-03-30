@@ -552,12 +552,13 @@ async function run() {
 
     /* 5. 初始化 Tesseract Worker */
     setStatus('loading', '加载 OCR 引擎…');
-    const assets = new URL('./assets/', document.baseURI).href;
+    const assets  = new URL('./assets/', document.baseURI).href;
+    const siteRoot = new URL('./', document.baseURI).href;  // traineddata 放在根目录
     state.worker = await Tesseract.createWorker('chi_sim+eng', 3, {
       logger:     () => {},
       workerPath: assets + 'worker.min.js',
       corePath:   assets,
-      langPath:   assets + 'tessdata',
+      langPath:   siteRoot,   // chi_sim.traineddata.gz 和 eng.traineddata.gz 均在根目录
     });
     await state.worker.setParameters({
       tessedit_pageseg_mode: '11',  // 稀疏文字模式

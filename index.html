@@ -269,7 +269,7 @@ function correctOrientation(src) {
         let w = img.naturalWidth;
         let h = img.naturalHeight;
         // 强制缩小，防止大图导致 canvas 内存溢出
-        const MAX = 1800;
+        const MAX = 2400;
         const longest = Math.max(w, h);
         if (longest > MAX) {
           const s = MAX / longest;
@@ -484,8 +484,8 @@ async function run() {
       langPath:   assets + 'tessdata',
     });
     await state.worker.setParameters({
-      tessedit_pageseg_mode:   '11',  // 稀疏文字模式：适合标签图片
-      tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-',
+      tessedit_pageseg_mode: '11',  // 稀疏文字模式
+      // 不设 char_whitelist：LSTM 引擎加白名单反而降低置信度导致空输出
     });
 
     /* 6. 逐行处理 */

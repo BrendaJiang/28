@@ -451,7 +451,8 @@ async function preprocessImage(imageUrl) {
 
 /* ── 正则提取资产编号 ── */
 function extractAssetNumber(rawText) {
-  const text = rawText.replace(/\s+/g, ' ').trim();
+  // 合并跨行断开的数字（OCR 换行截断：1-0102-00\n779 → 1-0102-00779）
+  const text = rawText.replace(/([0-9])\n([0-9])/g, '$1$2').replace(/\s+/g, ' ').trim();
   // 规则 1：字母+数字前缀，后接两组纯数字（BIO403-1044-0070）
   const r1 = /[A-Z]{1,6}[0-9]{0,6}-[0-9]{2,8}-[0-9]{2,8}/gi;
   // 规则 2：纯数字分段（01-0101-00004），限制首段最多2位避免多余前导数字
@@ -465,6 +466,14 @@ function extractAssetNumber(rawText) {
       let result = matches.sort((a, b) => a.length - b.length)[0].toUpperCase();
       // 补全首段单数字为两位（OCR 常丢前导零：1-0101-00004 → 01-0101-00004）
       result = result.replace(/^([0-9])-/, '0$1-');
+      // 修正镜像读反（纯数字段：88500-1010-10 → 01-0101-00588）
+      if (/^\d+-\d+-\d+$/.test(result)) {
+        const parts = result.split('-');
+        if (parts[0].length > parts[parts.length - 1].length) {
+          const rev = result.split('').reverse().join('');
+          if (/^\d{1,2}-\d{2,6}-\d{2,8}$/.test(rev)) result = rev;
+        }
+      }
       return result;
     }
   }

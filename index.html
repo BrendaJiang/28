@@ -10,8 +10,6 @@
     window.bitable = bitable;
     window.dispatchEvent(new Event('bitable-ready'));
   </script>
-  <!-- Tesseract.js：同步加载，挂载全局 Tesseract 对象 -->
-  <script src="./assets/tesseract.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -57,6 +55,7 @@
     }
     .tag-photo  { background: #e8f3ff; color: #1456f0; }
     .tag-result { background: #e8f8f1; color: #1b8c51; }
+    .tag-key    { background: #f3eeff; color: #6b3fa0; }
     .field-input {
       flex: 1; border: 1px solid #dde0e5; border-radius: 6px;
       padding: 5px 10px; font-size: 13px; color: #1f2329;
@@ -154,6 +153,10 @@
     <span class="field-tag tag-result">结果列</span>
     <input class="field-input" id="result-field" type="text" value="资产编号识别" placeholder="写入结果的文本列名称">
   </div>
+  <div class="field-row">
+    <span class="field-tag tag-key">API Key</span>
+    <input class="field-input" id="api-key" type="password" placeholder="sk-ant-… （仅存于内存，不上传）">
+  </div>
 </div>
 
 <!-- 状态 & 进度 -->
@@ -209,7 +212,6 @@
 const state = {
   running: false,
   stats: { ok: 0, skip: 0, fail: 0 },
-  worker: null,
 };
 
 /* ── UI 辅助 ── */
@@ -258,195 +260,62 @@ function addLog(type, text) {
 function lockConfig(locked) {
   document.getElementById('photo-field').disabled  = locked;
   document.getElementById('result-field').disabled = locked;
+  document.getElementById('api-key').disabled      = locked;
 }
 
-/* ── 方向校正 + 缩放：EXIF 旋正并缩至最长边 ≤ 1800px ── */
-function correctOrientation(src) {
+/* ── 图片转 base64（EXIF 旋正 + 缩至最长边 ≤ 1568px，JPEG 格式节省 token）── */
+function imageToBase64(src) {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
       try {
-        let w = img.naturalWidth;
-        let h = img.naturalHeight;
-        // 强制缩小，防止大图导致 canvas 内存溢出
-        const MAX = 2400;
+        let w = img.naturalWidth, h = img.naturalHeight;
+        const MAX = 1568;
         const longest = Math.max(w, h);
-        if (longest > MAX) {
-          const s = MAX / longest;
-          w = Math.round(w * s);
-          h = Math.round(h * s);
-        }
-        const canvas = document.createElement('canvas');
-        canvas.width  = w;
-        canvas.height = h;
-        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-        // 检测画布是否真的有内容（非全黑/全白空白）
-        const sample = canvas.getContext('2d').getImageData(w >> 1, h >> 1, 1, 1).data;
-        // 若中心像素是纯黑则可能空白，但先不回退，交给 Tesseract 判断
-        const dataUrl = canvas.toDataURL('image/png');  // PNG 无损，Tesseract 解码更可靠
-        resolve(dataUrl);
-      } catch (e) {
-        console.warn('[orient] canvas失败:', e.message);
-        resolve(src);
-      }
-    };
-    img.onerror = () => resolve(src);
-    img.src = src;
-  });
-}
-
-/* ── 图像旋转（处理标签竖贴/侧贴的情况）── */
-function rotateImage(src, degrees) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      try {
-        const rad = degrees * Math.PI / 180;
-        const sin = Math.abs(Math.sin(rad)), cos = Math.abs(Math.cos(rad));
-        const w = img.naturalWidth, h = img.naturalHeight;
-        const rw = Math.round(w * cos + h * sin);
-        const rh = Math.round(w * sin + h * cos);
-        const canvas = document.createElement('canvas');
-        canvas.width = rw; canvas.height = rh;
-        const ctx = canvas.getContext('2d');
-        ctx.translate(rw / 2, rh / 2);
-        ctx.rotate(rad);
-        ctx.drawImage(img, -w / 2, -h / 2);
-        resolve(canvas.toDataURL('image/png'));
-      } catch (e) { resolve(src); }
-    };
-    img.onerror = () => resolve(src);
-    img.src = src;
-  });
-}
-
-/* ── 图像预处理：灰度 + 对比度拉伸 + 2× 放大 ── */
-function enhanceContrast(src) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      try {
-        // 2× 放大有助于识别细小字体（模拟 300dpi）
-        const scale = 2;
-        const MAX = 4800;
-        let w = img.naturalWidth * scale, h = img.naturalHeight * scale;
-        if (Math.max(w, h) > MAX) { const s = MAX / Math.max(w, h); w = Math.round(w * s); h = Math.round(h * s); }
+        if (longest > MAX) { const s = MAX / longest; w = Math.round(w * s); h = Math.round(h * s); }
         const canvas = document.createElement('canvas');
         canvas.width = w; canvas.height = h;
-        const ctx = canvas.getContext('2d');
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
-        ctx.drawImage(img, 0, 0, w, h);
-        const imageData = ctx.getImageData(0, 0, w, h);
-        const d = imageData.data;
-        // 灰度化
-        for (let i = 0; i < d.length; i += 4) {
-          const g = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
-          d[i] = d[i + 1] = d[i + 2] = g;
-        }
-        // 百分位对比度拉伸（p5–p95，避免噪点拉爆）
-        const hist = new Array(256).fill(0);
-        for (let i = 0; i < d.length; i += 4) hist[d[i]]++;
-        const total = d.length / 4;
-        let cum = 0, lo = 0, hi = 255;
-        for (let v = 0; v < 256; v++) {
-          cum += hist[v];
-          if (cum / total < 0.05) lo = v;
-          if (cum / total < 0.95) hi = v;
-        }
-        const range = hi - lo || 1;
-        for (let i = 0; i < d.length; i += 4) {
-          const v = Math.min(255, Math.max(0, Math.round(((d[i] - lo) / range) * 255)));
-          d[i] = d[i + 1] = d[i + 2] = v;
-        }
-        ctx.putImageData(imageData, 0, 0);
-        resolve(canvas.toDataURL('image/png'));
-      } catch (e) { resolve(src); }
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);  // drawImage 自动应用 EXIF 方向
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
+        resolve(dataUrl.split(',')[1]);   // 只取 base64 数据部分
+      } catch (e) { resolve(null); }
     };
-    img.onerror = () => resolve(src);
+    img.onerror = () => resolve(null);
     img.src = src;
   });
 }
 
-/* ── 图像预处理：fetch → blob URL → canvas Otsu 二值化 ── */
-async function preprocessImage(imageUrl) {
-  // 用 fetch 拿 blob，blob URL 不受 CORS 限制，canvas 不会被污染
-  let blobUrl = null;
-  try {
-    const resp = await fetch(imageUrl);
-    if (resp.ok) {
-      blobUrl = URL.createObjectURL(await resp.blob());
-    }
-  } catch (_) {}
-
-  const src = blobUrl || imageUrl;   // fetch 失败则直接用原始 URL
-
-  return new Promise((resolve) => {
-    const img = new Image();
-    if (!blobUrl) img.crossOrigin = 'anonymous';   // 非 blob 时仍尝试 CORS
-
-    img.onload = () => {
-      try {
-        const MAX = 2400, MIN = 600;
-        let { naturalWidth: w, naturalHeight: h } = img;
-        const scale = w < MIN ? MIN / w : w > MAX ? MAX / w : 1;
-        w = Math.round(w * scale);
-        h = Math.round(h * scale);
-
-        const canvas = document.createElement('canvas');
-        canvas.width  = w;
-        canvas.height = h;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, w, h);
-
-        // 灰度化
-        const imgData = ctx.getImageData(0, 0, w, h);
-        const data = imgData.data;
-        const gray = new Uint8Array(w * h);
-        for (let i = 0; i < w * h; i++) {
-          gray[i] = Math.round(0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2]);
-        }
-
-        // Otsu 阈值
-        const hist = new Array(256).fill(0);
-        for (const v of gray) hist[v]++;
-        const total = w * h;
-        let sum = 0;
-        for (let t = 0; t < 256; t++) sum += t * hist[t];
-        let sumB = 0, wB = 0, max = 0, threshold = 128;
-        for (let t = 0; t < 256; t++) {
-          wB += hist[t];
-          if (wB === 0) continue;
-          const wF = total - wB;
-          if (wF === 0) break;
-          sumB += t * hist[t];
-          const mB = sumB / wB;
-          const mF = (sum - sumB) / wF;
-          const between = wB * wF * (mB - mF) ** 2;
-          if (between > max) { max = between; threshold = t; }
-        }
-
-        // 二值化写回
-        for (let i = 0; i < w * h; i++) {
-          const v = gray[i] > threshold ? 255 : 0;
-          data[i * 4] = data[i * 4 + 1] = data[i * 4 + 2] = v;
-          data[i * 4 + 3] = 255;
-        }
-        ctx.putImageData(imgData, 0, 0);
-        if (blobUrl) URL.revokeObjectURL(blobUrl);
-        resolve(canvas.toDataURL('image/png'));
-      } catch (e) {
-        if (blobUrl) URL.revokeObjectURL(blobUrl);
-        resolve(imageUrl);   // canvas 失败则兜底原始 URL
-      }
-    };
-
-    img.onerror = () => {
-      if (blobUrl) URL.revokeObjectURL(blobUrl);
-      resolve(imageUrl);
-    };
-    img.src = src;
+/* ── 调用 Claude API 识别资产编号 ── */
+async function callClaudeOCR(base64Data, apiKey) {
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 50,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64Data } },
+          { type: 'text', text: '这是一张资产标签照片。只返回图中的资产编号，格式为字母数字加连字符的三段码（如BIO403-1044-0070或01-0101-00004）。只返回编号本身，不含任何其他文字。找不到时只返回"无"。' }
+        ]
+      }]
+    })
   });
+  if (!resp.ok) {
+    const err = await resp.text().catch(() => '');
+    throw new Error(`API错误 ${resp.status}: ${err.substring(0, 120)}`);
+  }
+  const data = await resp.json();
+  const text = (data.content?.[0]?.text || '').trim();
+  if (!text || text === '无') return null;
+  // 先用正则提取，若提取失败但返回值本身像编号则直接用
+  return extractAssetNumber(text) || (/^[A-Z0-9]+-[A-Z0-9]+-[A-Z0-9]+$/i.test(text) ? text.toUpperCase() : null);
 }
 
 /* ── 正则提取资产编号 ── */
@@ -583,20 +452,12 @@ async function run() {
     const total     = recordIds.length;
     if (total === 0) { setStatus('warning', '当前视图没有可见记录'); return; }
 
-    /* 5. 初始化 Tesseract Worker */
-    setStatus('loading', '加载 OCR 引擎…');
-    const assets  = new URL('./assets/', document.baseURI).href;
-    const siteRoot = new URL('./', document.baseURI).href;  // traineddata 放在根目录
-    state.worker = await Tesseract.createWorker('chi_sim+eng', 3, {
-      logger:     () => {},
-      workerPath: assets + 'worker.min.js',
-      corePath:   assets,
-      langPath:   siteRoot,   // chi_sim.traineddata.gz 和 eng.traineddata.gz 均在根目录
-    });
-    await state.worker.setParameters({
-      tessedit_pageseg_mode: '11',  // 稀疏文字模式
-      // 不设 char_whitelist：LSTM 引擎加白名单反而降低置信度导致空输出
-    });
+    /* 5. 校验 API Key */
+    const apiKey = document.getElementById('api-key').value.trim();
+    if (!apiKey) {
+      setStatus('error', '请填写 Anthropic API Key（sk-ant-…）');
+      return;
+    }
 
     /* 6. 逐行处理 */
     setStatus('loading', `开始识别，共 ${total} 条记录…`);
@@ -624,16 +485,15 @@ async function run() {
           continue;
         }
 
-        // OCR
+        // Claude Vision OCR
         let recognized = null;
-        let rawOcrText = '';
         let debugInfo  = '';
         try {
           const attachUrl = await getFirstAttachmentUrl(table, photoField.id, recordId, photoVal);
           if (!attachUrl) {
             debugInfo = '附件URL获取失败（SDK未返回URL）';
           } else {
-            // 下载图片为 blob，避免 CORS 问题
+            // 下载为 blob（绕过飞书附件的跨域限制）
             let blobUrl = null;
             try {
               const resp = await fetch(attachUrl);
@@ -641,117 +501,20 @@ async function run() {
             } catch (_) {}
             const src = blobUrl || attachUrl;
 
-            const tryRecognize = async (image, psmList) => {
-              for (const psm of psmList) {
-                await state.worker.setParameters({ tessedit_pageseg_mode: psm });
-                const { data: { text } } = await state.worker.recognize(image);
-                debugInfo = `PSM${psm} 长度=${text.length}`;
-                rawOcrText = text;
-                const r = extractAssetNumber(text);
-                if (r) return r;
-              }
-              return null;
-            };
-
-            // 策略 0：系统级 TextDetector（Chrome/Android ML Kit / Windows OCR / macOS Vision）
-            // 对真实照片比 Tesseract 准确得多；不支持时静默跳过
-            if ('TextDetector' in window) {
-              try {
-                const detector = new TextDetector();
-                const blobResp = await fetch(src);
-                const imgBlob = await blobResp.blob();
-                const bitmap = await createImageBitmap(imgBlob);
-                const detected = await detector.detect(bitmap);
-                bitmap.close();
-                if (detected && detected.length > 0) {
-                  rawOcrText = detected.map(t => t.rawValue).join('\n');
-                  debugInfo = `系统OCR ${detected.length}块`;
-                  recognized = extractAssetNumber(rawOcrText);
-                } else {
-                  debugInfo = '系统OCR 未检测到文字';
-                }
-              } catch (sysErr) {
-                console.warn('[TextDetector]', sysErr.message);
-              }
+            const base64 = await imageToBase64(src);
+            if (!base64) {
+              debugInfo = '图片转换失败';
+            } else {
+              recognized = await callClaudeOCR(base64, apiKey);
+              debugInfo = recognized ? 'Claude识别成功' : 'Claude未识别到编号';
             }
-
-            // 策略 1：EXIF 方向校正（浏览器 drawImage 自动旋正）→ LSTM 识别
-            const oriented = await correctOrientation(src);
-            const canvasOk = typeof oriented === 'string' && oriented.startsWith('data:');
-            debugInfo = canvasOk ? `canvas:${oriented.length}` : 'canvas失败用blobURL';
-            recognized = await tryRecognize(oriented, ['11', '6', '3', '7']);
-
-            // 策略 2：旋转 90° 顺时针（标签竖贴、2×36 窄条错误根因）
-            if (!recognized) {
-              debugInfo = '旋转90°CW…';
-              const rot90 = await rotateImage(src, 90);
-              if (rot90 !== src) recognized = await tryRecognize(rot90, ['11', '6', '3', '7']);
-            }
-
-            // 策略 3：旋转 90° 逆时针
-            if (!recognized) {
-              debugInfo = '旋转90°CCW…';
-              const rot270 = await rotateImage(src, 270);
-              if (rot270 !== src) recognized = await tryRecognize(rot270, ['11', '6', '3', '7']);
-            }
-
-            // 策略 4：2×3 分块 + 3× 放大（标签在大图中占比小时有效）
-            if (!recognized) {
-              debugInfo = '分块识别…';
-              recognized = await new Promise((resolveTile) => {
-                const img2 = new Image();
-                img2.onload = async () => {
-                  const W = img2.naturalWidth, H = img2.naturalHeight;
-                  const COLS = 2, ROWS = 3, SCALE = 3;
-                  const stepX = Math.round(W / COLS), stepY = Math.round(H / ROWS);
-                  let found = null;
-                  for (let row = 0; row < ROWS && !found; row++) {
-                    for (let col = 0; col < COLS && !found; col++) {
-                      const x = Math.max(0, col * stepX - Math.round(stepX * 0.15));
-                      const y = Math.max(0, row * stepY - Math.round(stepY * 0.15));
-                      const w = Math.min(W - x, Math.round(stepX * 1.3));
-                      const h = Math.min(H - y, Math.round(stepY * 1.3));
-                      const cv = document.createElement('canvas');
-                      cv.width  = Math.min(w * SCALE, 3600);
-                      cv.height = Math.min(h * SCALE, 3600);
-                      const cx2 = cv.getContext('2d');
-                      cx2.imageSmoothingEnabled = true;
-                      cx2.imageSmoothingQuality = 'high';
-                      cx2.drawImage(img2, x, y, w, h, 0, 0, cv.width, cv.height);
-                      found = await tryRecognize(cv.toDataURL('image/png'), ['11', '6', '3']);
-                    }
-                  }
-                  resolveTile(found);
-                };
-                img2.onerror = () => resolveTile(null);
-                img2.src = src;
-              });
-            }
-
-            // 策略 5：灰度 + 对比度拉伸 + 2× 放大（低对比度标签）
-            if (!recognized) {
-              debugInfo = '对比度增强…';
-              const enhanced = await enhanceContrast(src);
-              if (enhanced !== src) {
-                recognized = await tryRecognize(enhanced, ['11', '6', '3', '7']);
-              }
-            }
-
-            // 策略 6：Otsu 二值化兜底
-            if (!recognized) {
-              debugInfo = '改用Otsu预处理…';
-              const processed = await preprocessImage(src);
-              if (processed !== src) {
-                recognized = await tryRecognize(processed, ['11', '6', '7']);
-              }
-            }
-
             if (blobUrl) URL.revokeObjectURL(blobUrl);
-            await state.worker.setParameters({ tessedit_pageseg_mode: '11' }); // 还原
           }
         } catch (ocrErr) {
-          console.error('OCR 出错', ocrErr);
-          debugInfo = `异常: ${ocrErr.message || ocrErr}`;
+          // 401/429 等 API 级别错误：抛出终止整个流程
+          if (/API错误 (401|403)/.test(ocrErr.message)) throw new Error(`API Key 无效或无权限：${ocrErr.message}`);
+          if (/API错误 429/.test(ocrErr.message))       throw new Error('请求频率超限，请稍后重试');
+          debugInfo = `错误: ${ocrErr.message}`;
         }
 
         // 回写
@@ -759,15 +522,9 @@ async function run() {
           await table.setCellValue(resultField.id, recordId, [{ type: 'text', text: recognized }]);
           state.stats.ok++;
           addLog('ok', `第 ${i + 1} 行 → ${recognized}`);
-          console.log(`[调试] 第${i+1}行成功，OCR原文:`, rawOcrText.trim().substring(0, 200));
         } else {
           state.stats.fail++;
-          const preview = rawOcrText.trim().substring(0, 100).replace(/\n/g, '↵');
-          const msg = preview
-            ? `第 ${i + 1} 行 [${debugInfo}] OCR文本: "${preview}"`
-            : `第 ${i + 1} 行 — ${debugInfo}`;
-          addLog('fail', msg);
-          console.log(`[调试] 第${i+1}行完整OCR文本:`, rawOcrText);
+          addLog('fail', `第 ${i + 1} 行 — ${debugInfo}`);
         }
       } catch (rowErr) {
         console.error('处理记录出错', recordId, rowErr);
@@ -795,13 +552,7 @@ async function run() {
 }
 
 /* ── 重新扫描 ── */
-async function restart() {
-  if (state.worker) {
-    try { await state.worker.terminate(); } catch (_) {}
-    state.worker = null;
-  }
-  run();
-}
+function restart() { run(); }
 
 /* ── 自动启动
    ESM 模块脚本与 DOMContentLoaded 的触发顺序在不同 WebView 中不固定，

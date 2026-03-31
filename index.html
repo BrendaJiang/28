@@ -191,7 +191,7 @@
     </div>
   </div>
 
-  <button class="btn btn-primary" id="restart-btn" style="display:none" onclick="restart()">重新扫描全表</button>
+  <button class="btn btn-primary" id="restart-btn" style="display:none" onclick="run()">开始识别</button>
 </div>
 
 <!-- 识别日志 -->
@@ -539,6 +539,7 @@ async function run() {
     showProgress(total, total);
     const msg = `全部处理完毕 — 识别 ${state.stats.ok} 条，跳过 ${state.stats.skip} 条，失败 ${state.stats.fail} 条`;
     setStatus(state.stats.fail > 0 ? 'warning' : 'success', msg);
+    document.getElementById('restart-btn').textContent   = '重新扫描全表';
     document.getElementById('restart-btn').style.display = 'block';
     document.getElementById('tip').style.display         = 'block';
 
@@ -548,21 +549,27 @@ async function run() {
   } finally {
     state.running = false;
     lockConfig(false);
+    // 无论成功、失败还是提前退出，都确保按钮可见（让用户可以重试）
+    const btn = document.getElementById('restart-btn');
+    if (btn.style.display === 'none') {
+      btn.textContent = '重新开始';
+      btn.style.display = 'block';
+    }
   }
 }
 
-/* ── 重新扫描 ── */
-function restart() { run(); }
+/* ── bitable 就绪后显示"开始识别"按钮，等待用户填好 API Key 后手动触发 ── */
+function onBitableReady() {
+  setStatus('init', '已连接飞书，填写 API Key 后点击「开始识别」');
+  document.getElementById('restart-btn').textContent = '开始识别';
+  document.getElementById('restart-btn').style.display = 'block';
+}
 
-/* ── 自动启动
-   ESM 模块脚本与 DOMContentLoaded 的触发顺序在不同 WebView 中不固定，
-   采用双向等待：bitable 已就绪则立即启动，否则等待 bitable-ready 事件。
-── */
 function startWhenReady() {
   if (window.bitable != null) {
-    run();
+    onBitableReady();
   } else {
-    window.addEventListener('bitable-ready', run, { once: true });
+    window.addEventListener('bitable-ready', onBitableReady, { once: true });
   }
 }
 

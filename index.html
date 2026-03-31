@@ -453,31 +453,55 @@ async function preprocessImage(imageUrl) {
 function extractAssetNumber(rawText) {
   // 合并跨行断开的数字（OCR 换行截断：1-0102-00\n\n779 → 1-0102-00779）
   const text = rawText.replace(/([0-9])[\n\r]+([0-9])/g, '$1$2').replace(/\s+/g, ' ').trim();
+  // 同时准备一份「字符纠错文本」：将数字段中常见 OCR 混淆字母替换为数字
+  // 仅对连字符之间（数字段）做替换，不影响字母前缀（BIO 中的 O/I）
+  const textNorm = text.replace(/-([A-Z0-9]+)(?=-)/g, (_, seg) =>
+    '-' + seg.replace(/O/g,'0').replace(/[IL]/g,'1').replace(/S/g,'5').replace(/Z/g,'2').replace(/G/g,'6')
+  );
+
   // 规则 1：字母+数字前缀，后接两组纯数字（BIO403-1044-0070）
   const r1 = /[A-Z]{1,6}[0-9]{0,6}-[0-9]{2,8}-[0-9]{2,8}/gi;
   // 规则 2：纯数字分段（01-0101-00004），限制首段最多2位避免多余前导数字
   const r2 = /\b[0-9]{1,2}-[0-9]{2,6}-[0-9]{2,8}\b/g;
   // 规则 3：宽松匹配（任意字母数字，两个连字符）
   const r3 = /\b[A-Z0-9]{2,12}-[A-Z0-9]{2,8}-[A-Z0-9]{2,8}\b/gi;
-  for (const pattern of [r1, r2, r3]) {
-    const matches = text.match(pattern);
-    if (matches && matches.length > 0) {
-      // 取最短匹配（去除 OCR 噪点拼接的多余前缀）
-      let result = matches.sort((a, b) => a.length - b.length)[0].toUpperCase();
-      // 补全首段单数字为两位（OCR 常丢前导零：1-0101-00004 → 01-0101-00004）
-      result = result.replace(/^([0-9])-/, '0$1-');
-      // 修正镜像读反（纯数字段：88500-1010-10 → 01-0101-00588）
-      if (/^\d+-\d+-\d+$/.test(result)) {
-        const parts = result.split('-');
-        if (parts[0].length > parts[parts.length - 1].length) {
-          const rev = result.split('').reverse().join('');
-          if (/^\d{1,2}-\d{2,6}-\d{2,8}$/.test(rev)) result = rev;
-        }
-      }
-      return result;
+
+  // 用原文匹配 r1（保留 BIO 等字母前缀），用纠错文本匹配 r2/r3
+  const candidates = [
+    ...(text.match(r1) || []),
+    ...(textNorm.match(r2) || []),
+    ...(textNorm.match(r3) || []),
+  ];
+  if (candidates.length === 0) return null;
+
+  // 优先 r1 > r2 > r3；同级取最短匹配
+  const r1re = /^[A-Z]{1,6}[0-9]{0,6}-[0-9]{2,8}-[0-9]{2,8}$/i;
+  const r2re = /^\d{1,2}-\d{2,6}-\d{2,8}$/;
+  const pick = (list) => list.length ? list.sort((a,b) => a.length-b.length)[0] : null;
+  let result = (pick(candidates.filter(c => r1re.test(c))) ||
+                pick(candidates.filter(c => r2re.test(c))) ||
+                pick(candidates)).toUpperCase();
+
+  // 补全首段单数字为两位（1-0101-00004 → 01-0101-00004）
+  result = result.replace(/^([0-9])-/, '0$1-');
+
+  // 修正镜像读反（纯数字段：88500-1010-10 → 01-0101-00588）
+  if (/^\d+-\d+-\d+$/.test(result)) {
+    const parts = result.split('-');
+    if (parts[0].length > parts[parts.length - 1].length) {
+      const rev = result.split('').reverse().join('');
+      if (/^\d{1,2}-\d{2,6}-\d{2,8}$/.test(rev)) result = rev;
     }
   }
-  return null;
+
+  // 修剪纯数字码末段多余位（OCR在末段后多读1位噪点：01-0101-005885 → 01-0101-00588）
+  // 观察到的纯数字格式末段固定5位；超过5位时截断
+  if (/^\d{1,2}-\d+-\d{6,}$/.test(result)) {
+    const parts = result.split('-');
+    result = parts[0] + '-' + parts[1] + '-' + parts[2].slice(0, 5);
+  }
+
+  return result;
 }
 
 /* ── 判断单元格是否有值 ── */

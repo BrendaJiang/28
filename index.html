@@ -298,7 +298,7 @@ function decodeQR(src) {
           if (code && code.data) { resolve(code.data.trim()); return; }
         }
         resolve(null);
-      } catch (e) { resolve(null); }
+      } catch (e) { console.error('[decodeQR]', e); resolve(null); }
     };
     img.onerror = () => resolve(null);
     img.src = src;
@@ -401,6 +401,10 @@ async function run() {
 
   try {
     /* 1. 检查环境 */
+    if (typeof jsQR !== 'function') {
+      setStatus('error', 'jsQR 库未加载——请确认 assets/jsQR.js 已上传到 GitHub Pages');
+      return;
+    }
     const inIframe = window !== window.top;
     if (window.bitable == null) {
       setStatus('error', inIframe

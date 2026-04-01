@@ -305,6 +305,31 @@ function decodeQR(src) {
   });
 }
 
+/* ── Cloudflare Worker URL（解析 epandian deviceV2 链接） ── */
+const WORKER_URL = 'https://epandian-asset-resolver.brenda-jiang.workers.dev';
+
+/* ── 通过 Cloudflare Worker 解析 epandian.com deviceV2 URL → 资产编号 ── */
+async function fetchAssetFromUrl(url) {
+  try {
+    // 提取 deviceV2 路径中的 hex ID：https://www.epandian.com/deviceV2/{hex}
+    const m = url.match(/\/deviceV2\/([0-9a-f]+)/i);
+    if (m) {
+      const resp = await fetch(`${WORKER_URL}?deviceId=${m[1]}`);
+      if (!resp.ok) return null;
+      const data = await resp.json();
+      return data.assetCode || null;
+    }
+    // 其他 epandian URL 格式（/device/ 等）：直接取末段作为资产编号
+    const parts = url.replace(/\/$/, '').split('/');
+    const last = parts[parts.length - 1];
+    if (last && /^[A-Z0-9]+-[A-Z0-9]+-[A-Z0-9]+$/i.test(last)) return last.toUpperCase();
+    return null;
+  } catch (e) {
+    console.warn('[fetchAssetFromUrl]', e.message);
+    return null;
+  }
+}
+
 /* ── 正则提取资产编号 ── */
 function extractAssetNumber(rawText) {
   // 合并跨行断开的数字（OCR 换行截断：1-0102-00\n\n779 → 1-0102-00779）
@@ -486,9 +511,15 @@ async function run() {
 
             const qrText = await decodeQR(src);
             if (qrText) {
-              // QR 内容可能是完整编号、也可能含 URL 等前缀，用正则提取
               recognized = extractAssetNumber(qrText)
                 || (/^[A-Z0-9]+-[A-Z0-9]+-[A-Z0-9]+$/i.test(qrText) ? qrText.toUpperCase() : null);
+
+              // QR 内容是 URL（如 epandian.com）→ 访问页面提取编号
+              if (!recognized && /^https?:\/\//i.test(qrText)) {
+                debugInfo = `访问 ${qrText.substring(0, 50)}…`;
+                recognized = await fetchAssetFromUrl(qrText);
+              }
+
               debugInfo = recognized ? 'QR解码成功' : `QR内容无法解析: ${qrText.substring(0, 60)}`;
             } else {
               debugInfo = '未检测到二维码';

@@ -11,6 +11,7 @@
     window.dispatchEvent(new Event('bitable-ready'));
   </script>
   <script src="./assets/jsQR.js"></script>
+  <script src="./assets/tesseract.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -438,6 +439,36 @@ function decodeQR(src) {
 /* ── Cloudflare Worker URL（解析 epandian deviceV2 链接） ── */
 const WORKER_URL = 'https://epandian-asset-resolver.brenda-jiang.workers.dev';
 
+/* ── Tesseract OCR Worker（懒加载，仅在 QR 失败时初始化） ── */
+let _tessWorker = null;
+let _tessReady = false;
+async function getTessWorker() {
+  if (_tessWorker && _tessReady) return _tessWorker;
+  const base = (() => {
+    try { return new URL('.', document.currentScript?.src || location.href).href; } catch { return './'; }
+  })();
+  _tessWorker = await Tesseract.createWorker('eng', 1, {
+    workerPath: base + 'assets/worker.min.js',
+    langPath:   base + 'assets/tessdata',
+    corePath:   base + 'assets/tesseract-core-lstm.wasm.js',
+    logger:     () => {}
+  });
+  _tessReady = true;
+  return _tessWorker;
+}
+
+// QR 解码失败时，用 OCR 从图片中提取资产编号文本
+async function ocrExtractAssetCode(src) {
+  try {
+    const worker = await getTessWorker();
+    const { data: { text } } = await worker.recognize(src);
+    return extractAssetNumber(text) || null;
+  } catch (e) {
+    console.warn('[OCR]', e.message);
+    return null;
+  }
+}
+
 /* ── 通过 Cloudflare Worker 解析 epandian.com deviceV2 URL → 资产编号 ── */
 async function fetchAssetFromUrl(url) {
   try {
@@ -651,7 +682,12 @@ async function run() {
                 if (!code && /^https?:\/\//i.test(qrText)) code = await fetchAssetFromUrl(qrText);
               }
               if (code) recognizedList.push(code);
-              else failList.push(`第${ai+1}张${qrText ? `(内容无法解析)` : '(未检测到QR)'}`);
+              else {
+                // QR 解码失败，尝试 OCR 直接读标签文字
+                const ocrCode = await ocrExtractAssetCode(src);
+                if (ocrCode) recognizedList.push(ocrCode);
+                else failList.push(`第${ai+1}张${qrText ? '(QR内容无法解析)' : '(未检测到QR/OCR)'}`);
+              }
               if (blobUrl) URL.revokeObjectURL(blobUrl);
             }
             if (recognizedList.length > 0) {

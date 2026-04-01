@@ -354,11 +354,12 @@ function decodeQR(src) {
           return cv;
         }
 
-        // 从 canvas 中裁切区域，放大到 targetSize
+        // 从 canvas 中裁切区域，等比放大（长边缩放到 targetSize，保持宽高比）
         function cropAndZoom(src, sx, sy, sw, sh, targetSize) {
+          const scale = targetSize / Math.max(sw, sh);
           const cv = document.createElement('canvas');
-          cv.width = targetSize; cv.height = targetSize;
-          cv.getContext('2d').drawImage(src, sx, sy, sw, sh, 0, 0, targetSize, targetSize);
+          cv.width = Math.round(sw * scale); cv.height = Math.round(sh * scale);
+          cv.getContext('2d').drawImage(src, sx, sy, sw, sh, 0, 0, cv.width, cv.height);
           return cv;
         }
 

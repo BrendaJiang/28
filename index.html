@@ -188,7 +188,10 @@
     </div>
   </div>
 
-  <button class="btn btn-primary" id="restart-btn" style="display:none" onclick="run()">重新扫描全表</button>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <button class="btn btn-ghost"   id="scan-new-btn"  style="display:none" onclick="run('new')">扫描新增行</button>
+    <button class="btn btn-primary" id="restart-btn"   style="display:none" onclick="run('all')">重新扫描全表</button>
+  </div>
 </div>
 
 <!-- 识别日志 -->
@@ -498,7 +501,11 @@ async function fetchAssetFromUrl(url) {
 /* ── 正则提取资产编号 ── */
 function extractAssetNumber(rawText) {
   // 合并跨行断开的数字（OCR 换行截断：1-0102-00\n\n779 → 1-0102-00779）
-  const text = rawText.replace(/([0-9])[\n\r]+([0-9])/g, '$1$2').replace(/\s+/g, ' ').trim();
+  let text = rawText.replace(/([0-9])[\n\r]+([0-9])/g, '$1$2').replace(/\s+/g, ' ').trim();
+  // 修正「连字符被 OCR 读成空格」：字母数字段-数字段 空格 数字段 → 加上连字符
+  // 例：BIO403-1041 0583 → BIO403-1041-0583；058.3 → 0583
+  text = text.replace(/([A-Z0-9]{2,}-[0-9]{2,})\s+([0-9]{3,})/gi, '$1-$2')
+             .replace(/([A-Z0-9]{2,}-[0-9]{2,}-[0-9]{1,})[.,]([0-9]{1,})/gi, '$1$2');
   // 同时准备一份「字符纠错文本」：将数字段中常见 OCR 混淆字母替换为数字
   // 仅对连字符之间（数字段）做替换，不影响字母前缀（BIO 中的 O/I）
   const textNorm = text.replace(/-([A-Z0-9]+)(?=-)/g, (_, seg) =>
@@ -573,12 +580,15 @@ async function getAllAttachmentUrls(table, fieldId, recordId, cellVal) {
 }
 
 /* ── 主流程 ── */
-async function run() {
+// mode = 'new'（默认）：跳过已有结果的行，仅处理新增/空白行（快）
+// mode = 'all'：强制重扫所有含图片的行，覆盖已有结果
+async function run(mode = 'new') {
   if (state.running) return;
   state.running = true;
   state.stats = { ok: 0, skip: 0, fail: 0 };
 
   document.getElementById('restart-btn').style.display   = 'none';
+  document.getElementById('scan-new-btn').style.display  = 'none';
   document.getElementById('log-card').style.display      = 'none';
   document.getElementById('log-scroll').innerHTML        = '';
   document.getElementById('tip').style.display           = 'none';
@@ -631,7 +641,8 @@ async function run() {
     if (total === 0) { setStatus('warning', '当前视图没有可见记录'); return; }
 
     /* 5. 开始逐行处理 */
-    setStatus('loading', `开始识别，共 ${total} 条记录…`);
+    const modeLabel = mode === 'all' ? '全表重扫' : '扫描新增';
+    setStatus('loading', `${modeLabel}：共 ${total} 条记录，开始处理…`);
     showProgress(0, total);
 
     for (let i = 0; i < total; i++) {
@@ -640,15 +651,16 @@ async function run() {
         const photoVal  = await table.getCellValue(photoField.id, recordId);
         const resultVal = await table.getCellValue(resultField.id, recordId);
 
-        // 两列都有值 → 跳过
-        if (hasValue(photoVal) && hasValue(resultVal)) {
+        // 「扫描新增」模式：结果列已有值 → 跳过（不论是否有图片）
+        // 「重扫全表」模式：无图片 → 跳过
+        if (mode === 'new' && hasValue(resultVal)) {
           state.stats.skip++;
           addLog('skip', `第 ${i + 1} 行 — 已有识别结果，跳过`);
           showProgress(i + 1, total);
           continue;
         }
 
-        // 无图片 → 跳过
+        // 无图片 → 跳过（两种模式共用）
         if (!hasValue(photoVal)) {
           state.stats.skip++;
           addLog('skip', `第 ${i + 1} 行 — 无图片，跳过`);
@@ -723,8 +735,9 @@ async function run() {
     showProgress(total, total);
     const msg = `全部处理完毕 — 识别 ${state.stats.ok} 条，跳过 ${state.stats.skip} 条，失败 ${state.stats.fail} 条`;
     setStatus(state.stats.fail > 0 ? 'warning' : 'success', msg);
-    document.getElementById('restart-btn').style.display = 'block';
-    document.getElementById('tip').style.display         = 'block';
+    document.getElementById('restart-btn').style.display  = 'block';
+    document.getElementById('scan-new-btn').style.display  = 'block';
+    document.getElementById('tip').style.display           = 'block';
 
   } catch (err) {
     console.error('主流程出错', err);
@@ -733,8 +746,10 @@ async function run() {
     state.running = false;
     lockConfig(false);
     // 无论成功、失败还是提前退出，都确保按钮可见（让用户可以重试）
-    const btn = document.getElementById('restart-btn');
-    if (btn.style.display === 'none') btn.style.display = 'block';
+    const b1 = document.getElementById('restart-btn');
+    const b2 = document.getElementById('scan-new-btn');
+    if (b1.style.display === 'none') b1.style.display = 'block';
+    if (b2.style.display === 'none') b2.style.display = 'block';
   }
 }
 

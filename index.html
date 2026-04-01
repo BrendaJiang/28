@@ -258,45 +258,80 @@ function lockConfig(locked) {
   document.getElementById('result-field').disabled = locked;
 }
 
-/* ── jsQR 解码：尝试原图 + 90°旋转，处理手机拍照角度问题 ── */
+/* ── jsQR 解码：多角度 + 多阈值，提升对复杂光线的识别率 ── */
 function decodeQR(src) {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
       try {
         let w = img.naturalWidth, h = img.naturalHeight;
-        // 保持较高分辨率，QR 码细节越清晰越好（最长边限制 2400px 防内存溢出）
         const MAX = 2400;
         const longest = Math.max(w, h);
         if (longest > MAX) { const s = MAX / longest; w = Math.round(w * s); h = Math.round(h * s); }
 
         const canvas = document.createElement('canvas');
         canvas.width = w; canvas.height = h;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, w, h);   // drawImage 自动修正 EXIF 方向
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
 
-        // 尝试 4 个方向（手机横竖拍、标签贴法各异）
-        const angles = [0, 90, 180, 270];
-        for (const deg of angles) {
-          let cw = w, ch = h;
+        // 旋转 canvas（drawImage 自动修正 EXIF 方向）
+        function rotated(src, deg, sw, sh) {
           const cv = document.createElement('canvas');
           if (deg === 0) {
-            cv.width = w; cv.height = h;
-            cv.getContext('2d').drawImage(canvas, 0, 0);
+            cv.width = sw; cv.height = sh;
+            cv.getContext('2d').drawImage(src, 0, 0);
           } else {
             const rad = deg * Math.PI / 180;
-            cw = deg === 180 ? w : h;
-            ch = deg === 180 ? h : w;
+            const cw = deg === 180 ? sw : sh;
+            const ch = deg === 180 ? sh : sw;
             cv.width = cw; cv.height = ch;
             const cx = cv.getContext('2d');
             cx.translate(cw / 2, ch / 2);
             cx.rotate(rad);
-            cx.drawImage(canvas, -w / 2, -h / 2);
+            cx.drawImage(src, -sw / 2, -sh / 2);
           }
-          const id = cv.getContext('2d').getImageData(0, 0, cw, ch);
-          const code = jsQR(id.data, id.width, id.height, { inversionAttempts: 'attemptBoth' });
-          if (code && code.data) { resolve(code.data.trim()); return; }
+          return cv;
         }
+
+        // 灰度二值化（阈值 t：0-255）
+        function thresholded(src, t) {
+          const cv = document.createElement('canvas');
+          cv.width = src.width; cv.height = src.height;
+          const ctx = cv.getContext('2d');
+          ctx.drawImage(src, 0, 0);
+          const id = ctx.getImageData(0, 0, cv.width, cv.height);
+          const d = id.data;
+          for (let i = 0; i < d.length; i += 4) {
+            const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+            const v = g > t ? 255 : 0;
+            d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255;
+          }
+          ctx.putImageData(id, 0, 0);
+          return cv;
+        }
+
+        function tryDecode(cv) {
+          const id = cv.getContext('2d').getImageData(0, 0, cv.width, cv.height);
+          const code = jsQR(id.data, id.width, id.height, { inversionAttempts: 'attemptBoth' });
+          return (code && code.data) ? code.data.trim() : null;
+        }
+
+        const angles = [0, 90, 180, 270];
+
+        // Pass 1：原图 × 4 方向
+        for (const deg of angles) {
+          const result = tryDecode(rotated(canvas, deg, w, h));
+          if (result) { resolve(result); return; }
+        }
+
+        // Pass 2：灰度二值化（4档阈值）× 4 方向
+        for (const t of [80, 110, 140, 170]) {
+          const tv = thresholded(canvas, t);
+          for (const deg of angles) {
+            const result = tryDecode(rotated(tv, deg, tv.width, tv.height));
+            if (result) { resolve(result); return; }
+          }
+        }
+
         resolve(null);
       } catch (e) { console.error('[decodeQR]', e); resolve(null); }
     };
@@ -495,7 +530,7 @@ async function run() {
           continue;
         }
 
-        // jsQR 二维码解码（遍历所有附件照片，直到识别成功）
+        // jsQR 二维码解码（遍历所有附件照片，汇总全部识别结果）
         let recognized = null;
         let debugInfo  = '';
         try {
@@ -503,33 +538,32 @@ async function run() {
           if (attachUrls.length === 0) {
             debugInfo = '附件URL获取失败（SDK未返回URL）';
           } else {
+            const recognizedList = [];
+            const failList = [];
             for (let ai = 0; ai < attachUrls.length; ai++) {
-              const attachUrl = attachUrls[ai];
               let blobUrl = null;
               try {
-                const resp = await fetch(attachUrl);
+                const resp = await fetch(attachUrls[ai]);
                 if (resp.ok) blobUrl = URL.createObjectURL(await resp.blob());
               } catch (_) {}
-              const src = blobUrl || attachUrl;
+              const src = blobUrl || attachUrls[ai];
 
               const qrText = await decodeQR(src);
+              let code = null;
               if (qrText) {
-                recognized = extractAssetNumber(qrText)
+                code = extractAssetNumber(qrText)
                   || (/^[A-Z0-9]+-[A-Z0-9]+-[A-Z0-9]+$/i.test(qrText) ? qrText.toUpperCase() : null);
-
-                // QR 内容是 URL（如 epandian.com）→ 通过 Worker 提取编号
-                if (!recognized && /^https?:\/\//i.test(qrText)) {
-                  recognized = await fetchAssetFromUrl(qrText);
-                }
-
-                debugInfo = recognized ? `QR解码成功（第${ai+1}张）` : `QR内容无法解析: ${qrText.substring(0, 60)}`;
-              } else {
-                debugInfo = attachUrls.length > 1
-                  ? `未检测到二维码（${ai+1}/${attachUrls.length}张均失败）`
-                  : '未检测到二维码';
+                if (!code && /^https?:\/\//i.test(qrText)) code = await fetchAssetFromUrl(qrText);
               }
+              if (code) recognizedList.push(code);
+              else failList.push(`第${ai+1}张${qrText ? `(内容无法解析)` : '(未检测到QR)'}`);
               if (blobUrl) URL.revokeObjectURL(blobUrl);
-              if (recognized) break; // 已识别，无需继续尝试
+            }
+            if (recognizedList.length > 0) {
+              recognized = recognizedList.join('\n');
+              debugInfo = `识别成功 ${recognizedList.length}/${attachUrls.length} 张`;
+            } else {
+              debugInfo = failList.join('；');
             }
           }
         } catch (qrErr) {

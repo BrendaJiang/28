@@ -273,7 +273,7 @@ function decodeQR(src) {
         canvas.width = w; canvas.height = h;
         canvas.getContext('2d').drawImage(img, 0, 0, w, h);
 
-        // 旋转 canvas（drawImage 自动修正 EXIF 方向）
+        // 旋转整张 canvas
         function rotated(src, deg, sw, sh) {
           const cv = document.createElement('canvas');
           if (deg === 0) {
@@ -292,7 +292,7 @@ function decodeQR(src) {
           return cv;
         }
 
-        // 灰度二值化（阈值 t：0-255）
+        // 全局灰度二值化
         function thresholded(src, t) {
           const cv = document.createElement('canvas');
           cv.width = src.width; cv.height = src.height;
@@ -309,27 +309,121 @@ function decodeQR(src) {
           return cv;
         }
 
+        // 自适应局部阈值（块大小 blockSize，偏移 C）—— 处理不均匀光照
+        function adaptiveThreshold(src, blockSize, C) {
+          const cv = document.createElement('canvas');
+          cv.width = src.width; cv.height = src.height;
+          const ctx = cv.getContext('2d');
+          ctx.drawImage(src, 0, 0);
+          const id = ctx.getImageData(0, 0, cv.width, cv.height);
+          const d = id.data;
+          const W = cv.width, H = cv.height;
+          const half = Math.floor(blockSize / 2);
+          // 灰度化
+          const gray = new Float32Array(W * H);
+          for (let i = 0; i < W * H; i++) {
+            const j = i * 4;
+            gray[i] = 0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2];
+          }
+          // 积分图加速局部均值
+          const intg = new Float64Array((W + 1) * (H + 1));
+          for (let y = 1; y <= H; y++) {
+            for (let x = 1; x <= W; x++) {
+              intg[y * (W + 1) + x] = gray[(y - 1) * W + (x - 1)]
+                + intg[(y - 1) * (W + 1) + x]
+                + intg[y * (W + 1) + (x - 1)]
+                - intg[(y - 1) * (W + 1) + (x - 1)];
+            }
+          }
+          for (let y = 0; y < H; y++) {
+            for (let x = 0; x < W; x++) {
+              const x1 = Math.max(0, x - half), y1 = Math.max(0, y - half);
+              const x2 = Math.min(W - 1, x + half), y2 = Math.min(H - 1, y + half);
+              const cnt = (x2 - x1 + 1) * (y2 - y1 + 1);
+              const sum = intg[(y2 + 1) * (W + 1) + (x2 + 1)]
+                - intg[y1 * (W + 1) + (x2 + 1)]
+                - intg[(y2 + 1) * (W + 1) + x1]
+                + intg[y1 * (W + 1) + x1];
+              const mean = sum / cnt;
+              const v = gray[y * W + x] < mean - C ? 0 : 255;
+              const j = (y * W + x) * 4;
+              d[j] = d[j + 1] = d[j + 2] = v; d[j + 3] = 255;
+            }
+          }
+          ctx.putImageData(id, 0, 0);
+          return cv;
+        }
+
+        // 从 canvas 中裁切区域，放大到 targetSize
+        function cropAndZoom(src, sx, sy, sw, sh, targetSize) {
+          const cv = document.createElement('canvas');
+          cv.width = targetSize; cv.height = targetSize;
+          cv.getContext('2d').drawImage(src, sx, sy, sw, sh, 0, 0, targetSize, targetSize);
+          return cv;
+        }
+
         function tryDecode(cv) {
           const id = cv.getContext('2d').getImageData(0, 0, cv.width, cv.height);
           const code = jsQR(id.data, id.width, id.height, { inversionAttempts: 'attemptBoth' });
           return (code && code.data) ? code.data.trim() : null;
         }
 
-        const angles = [0, 90, 180, 270];
-
-        // Pass 1：原图 × 4 方向
-        for (const deg of angles) {
-          const result = tryDecode(rotated(canvas, deg, w, h));
-          if (result) { resolve(result); return; }
+        // 对某个 canvas 尝试：原图 + 全局阈值 + 自适应阈值，各 4 方向
+        function tryAllOnCanvas(cv) {
+          const cw = cv.width, ch = cv.height;
+          const angles = [0, 90, 180, 270];
+          // 原图 4 方向
+          for (const deg of angles) {
+            const r = tryDecode(rotated(cv, deg, cw, ch));
+            if (r) return r;
+          }
+          // 全局二值化 × 5档
+          for (const t of [80, 110, 140, 160, 180]) {
+            const tv = thresholded(cv, t);
+            for (const deg of angles) {
+              const r = tryDecode(rotated(tv, deg, tv.width, tv.height));
+              if (r) return r;
+            }
+          }
+          // 自适应阈值（两种参数）
+          for (const [bs, c] of [[31, 10], [51, 15]]) {
+            const av = adaptiveThreshold(cv, bs, c);
+            for (const deg of angles) {
+              const r = tryDecode(rotated(av, deg, av.width, av.height));
+              if (r) return r;
+            }
+          }
+          return null;
         }
 
-        // Pass 2：灰度二值化（4档阈值）× 4 方向
-        for (const t of [80, 110, 140, 170]) {
-          const tv = thresholded(canvas, t);
-          for (const deg of angles) {
-            const result = tryDecode(rotated(tv, deg, tv.width, tv.height));
-            if (result) { resolve(result); return; }
-          }
+        // Pass 1：整张图
+        const r1 = tryAllOnCanvas(canvas);
+        if (r1) { resolve(r1); return; }
+
+        // Pass 2：9 个裁切区域（3×3 网格 + 4 个半区）放大到 800px，再尝试
+        const ZOOM = 800;
+        const regions = [];
+        // 四象限
+        const hw = Math.floor(w / 2), hh = Math.floor(h / 2);
+        regions.push([0, 0, hw, hh]);           // 左上
+        regions.push([hw, 0, w - hw, hh]);       // 右上
+        regions.push([0, hh, hw, h - hh]);       // 左下
+        regions.push([hw, hh, w - hw, h - hh]);  // 右下
+        // 中央 50%
+        const cx = Math.floor(w * 0.25), cy = Math.floor(h * 0.25);
+        regions.push([cx, cy, Math.floor(w * 0.5), Math.floor(h * 0.5)]);
+        // 左右半区（全高）
+        regions.push([0, 0, hw, h]);
+        regions.push([hw, 0, w - hw, h]);
+        // 上下半区（全宽）
+        regions.push([0, 0, w, hh]);
+        regions.push([0, hh, w, h - hh]);
+
+        for (const [rx, ry, rw, rh] of regions) {
+          if (rw < 50 || rh < 50) continue;
+          const zoomed = cropAndZoom(canvas, rx, ry, rw, rh, ZOOM);
+          const r = tryAllOnCanvas(zoomed);
+          if (r) { resolve(r); return; }
         }
 
         resolve(null);
